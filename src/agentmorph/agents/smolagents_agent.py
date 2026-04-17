@@ -11,6 +11,7 @@ importable without smolagents installed.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,34 +22,82 @@ from agentmorph.trajectories import Trajectory
 
 # -- JSON Schema → smolagents `inputs` dict ---------------------------------
 
+# smolagents restricts input types to a small enum; anything else raises at
+# tool-class creation. Map JSON-Schema types into that enum.
+_SMOLA_TYPES = {
+    "string": "string",
+    "integer": "integer",
+    "number": "number",
+    "boolean": "boolean",
+    "array": "array",
+    "object": "object",
+}
+
+
 def _params_to_smolagents_inputs(schema: dict[str, Any]) -> dict[str, dict[str, Any]]:
     required = set(schema.get("required", []))
     out: dict[str, dict[str, Any]] = {}
     for name, spec in schema.get("properties", {}).items():
-        out[name] = {
-            "type": spec.get("type", "any"),
-            "description": spec.get("description", ""),
-            "nullable": name not in required,
+        t = _SMOLA_TYPES.get(spec.get("type", "string"), "string")
+        entry: dict[str, Any] = {
+            "type": t,
+            "description": spec.get("description", "") or name,
         }
+        if name not in required:
+            entry["nullable"] = True
+        out[name] = entry
     return out
 
 
 def _wrap_tool(tool: Tool) -> Any:
-    """Return a smolagents.Tool instance that proxies to our Tool."""
+    """Return a smolagents.Tool instance that proxies to our Tool.
+
+    smolagents validates that `forward`'s signature matches the declared
+    `inputs` dict (a `**kwargs` forward fails with "'forward' method
+    parameters were {...}"), so we build a forward with the exact signature
+    the tool expects.
+    """
     from smolagents import Tool as SmolaTool  # lazy import
 
-    class _Wrapped(SmolaTool):
-        name = tool.name
-        description = tool.description
-        inputs = _params_to_smolagents_inputs(tool.parameters)
-        output_type = "any"
+    properties = tool.parameters.get("properties", {})
+    required = set(tool.parameters.get("required", []))
+    param_names = list(properties.keys())
 
-        def forward(self, **kwargs: Any) -> Any:  # noqa: D401
-            # smolagents passes through kwargs verbatim; our Tool validates them.
-            return tool.invoke(kwargs)
+    inputs_dict = _params_to_smolagents_inputs(tool.parameters)
 
-    _Wrapped.__name__ = f"Smola_{tool.name}"
-    return _Wrapped()
+    # Build an explicit signature for `forward(self, <named params>...)`.
+    fwd_params = [inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD)]
+    for name in param_names:
+        default = inspect.Parameter.empty if name in required else None
+        fwd_params.append(
+            inspect.Parameter(
+                name, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=default
+            )
+        )
+    fwd_sig = inspect.Signature(fwd_params)
+
+    def forward(self, **kwargs: Any) -> Any:
+        # Drop Nones so optional args don't mask our JSON-Schema defaults.
+        payload = {k: v for k, v in kwargs.items() if v is not None}
+        return tool.invoke(payload)
+
+    forward.__signature__ = fwd_sig  # type: ignore[attr-defined]
+    forward.__name__ = "forward"
+
+    cls = type(
+        f"Smola_{tool.name}",
+        (SmolaTool,),
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "inputs": inputs_dict,
+            # smolagents' AUTHORIZED_TYPES doesn't include "any"; "object" is
+            # the broadest safe choice for tools that return dicts/lists.
+            "output_type": "object",
+            "forward": forward,
+        },
+    )
+    return cls()
 
 
 # -- Model wrapper ----------------------------------------------------------
