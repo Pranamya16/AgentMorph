@@ -54,15 +54,30 @@ def _check_gpu() -> None:
 
 def _mount_drive() -> None:
     if DRIVE_MOUNT.exists() and any(DRIVE_MOUNT.iterdir()):
-        print("Drive already mounted.")
+        print(f"Drive already mounted at {DRIVE_MOUNT}.")
         return
     try:
         from google.colab import drive  # type: ignore
     except ImportError:
         print("Not running on Colab — skipping Drive mount.")
         return
-    drive.mount(str(DRIVE_MOUNT))
-    print(f"Drive mounted at {DRIVE_MOUNT}")
+    try:
+        drive.mount(str(DRIVE_MOUNT))
+        print(f"Drive mounted at {DRIVE_MOUNT}")
+    except AttributeError:
+        # `drive.mount` needs the live IPython kernel. When this script is
+        # launched via `!python ...` it runs in a subprocess with no kernel,
+        # so the mount call fails. Tell the user what to do and continue —
+        # the rest of bootstrap (install, smoketest) still works without Drive.
+        print(
+            "\n"
+            "Cannot mount Drive from a subprocess. Run this in a Colab cell "
+            "BEFORE calling the bootstrap script:\n\n"
+            "    from google.colab import drive\n"
+            "    drive.mount('/content/drive')\n\n"
+            "Then re-run this bootstrap. Continuing without Drive for now — "
+            "model cache and runs will land in /content (lost on session kill).\n"
+        )
 
 
 def _install() -> None:
