@@ -1,0 +1,64 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentmorph"
+version = "0.1.0.dev0"
+description = "Metamorphic testing for LLM agents"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "AgentMorph authors" }]
+dependencies = [
+    "pydantic>=2.6",
+    "jsonschema>=4.21",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+models = [
+    "torch>=2.3",
+    "transformers>=4.45",
+    "accelerate>=0.34",
+    "bitsandbytes>=0.43",
+]
+smolagents = [
+    "smolagents>=1.0",
+]
+langgraph = [
+    "langgraph>=0.2",
+    "langchain-core>=0.3",
+    "langchain-huggingface>=0.1",
+]
+agentdojo = [
+    "agentdojo>=0.1.20",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+]
+all = [
+    "agentmorph[models,smolagents,langgraph,agentdojo,dev]",
+]
+
+[project.scripts]
+agentmorph-baseline = "agentmorph.runner:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "gpu: requires a CUDA GPU",
+    "needs_agentdojo: requires AgentDojo installation",
+    "needs_smolagents: requires smolagents installation",
+    "needs_langgraph: requires LangGraph installation",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pandoc 'D:\\\\Documents\\\\AgentMorph\\\\AgentMorph_Execution_Plan.docx' -o /tmp/agentmorph_plan.md)",
+      "Read(//tmp/**)",
+      "Bash(python \"C:\\\\Users\\\\prana\\\\AppData\\\\Roaming\\\\Claude\\\\local-agent-mode-sessions\\\\skills-plugin\\\\b4033b48-477b-4b86-b3e1-ea854fa8b95d\\\\471acaf6-87a1-4d0a-a698-079e347b5008\\\\skills\\\\docx\\\\scripts\\\\office\\\\unpack.py\" \"D:\\\\Documents\\\\AgentMorph\\\\AgentMorph_Execution_Plan.docx\" /tmp/agentmorph_unpacked/)",
+      "Bash(pip install *)",
+      "Bash(python -c \"import sys; print\\(sys.version\\)\")",
+      "Bash(python -c \"import agentmorph; print\\('ok'\\)\")",
+      "Bash(python -m pytest tests/ -x)",
+      "Bash(python -m agentmorph.runner --model Llama-3.2-3B --framework native --env ecommerce --n-scenarios 5 --dry-run --out-dir runs/_smoketest)",
+      "Bash(python -m pytest tests/)"
+    ]
+  }
+}
