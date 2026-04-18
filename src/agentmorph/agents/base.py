@@ -68,8 +68,56 @@ Rules:
 """
 
 
-_JSON_BLOCK_RE = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
-_FINAL_RE = re.compile(r"FINAL:\s*(.*)", re.DOTALL)
+# Fenced code block in any of the common markers the small open models like
+# to emit: ```json (the one we ask for), ```python, plain ``` with no lang,
+# and even ```tool_code (some Gemma variants). All capture the JSON body.
+_JSON_BLOCK_RE = re.compile(
+    r"```(?:json|python|tool_code|tool)?\s*(\{.*?\})\s*```",
+    re.DOTALL,
+)
+
+# Last-resort: a bare JSON object in the output with no fence. Python's `re`
+# can't balance braces, so we do a short linear scan from each candidate `{`
+# that's followed by a `"tool"` or `"name"` key.
+_BARE_JSON_START = re.compile(r'\{\s*"(?:tool|name)"\s*:', re.DOTALL)
+
+
+def _find_bare_json(text: str) -> tuple[int, str] | None:
+    """Return (start_index, substring) of a balanced JSON object in `text`
+    that begins with `{"tool":` or `{"name":`, or None if not found."""
+    for m in _BARE_JSON_START.finditer(text):
+        start = m.start()
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\" and in_string:
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return start, text[start : i + 1]
+    return None
+
+# Final-answer triggers, in decreasing strictness. Each captures the tail
+# of the line/block as the answer.
+_FINAL_REGEXES: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*FINAL\s*:\s*(.*)$", re.DOTALL | re.MULTILINE),
+    re.compile(r"^\s*FINAL ANSWER\s*:\s*(.*)$", re.DOTALL | re.MULTILINE | re.IGNORECASE),
+    re.compile(r"(?:^|\n)\s*(?:The final answer is|My final answer is|Answer)\s*:\s*(.*)$", re.DOTALL | re.IGNORECASE),
+)
 
 
 def _render_tool_docs(registry: ToolRegistry) -> str:
@@ -85,22 +133,59 @@ def _render_tool_docs(registry: ToolRegistry) -> str:
     return "\n".join(lines)
 
 
-def _parse_step(text: str) -> tuple[str, dict[str, Any] | str]:
-    """Return either ('tool', {...}) or ('final', str) or ('noop', raw)."""
-    final_match = _FINAL_RE.search(text)
-    json_match = _JSON_BLOCK_RE.search(text)
+def _first_final_match(text: str) -> re.Match[str] | None:
+    best: re.Match[str] | None = None
+    for rx in _FINAL_REGEXES:
+        m = rx.search(text)
+        if m and (best is None or m.start() < best.start()):
+            best = m
+    return best
 
-    # Prefer whichever appears first in the output.
-    if final_match and (not json_match or final_match.start() < json_match.start()):
+
+def _normalize_tool_obj(obj: dict[str, Any]) -> dict[str, Any] | None:
+    """Accept {tool, arguments} OR {name, arguments} OR {name, args} shapes."""
+    name = obj.get("tool") or obj.get("name")
+    args = obj.get("arguments") or obj.get("args") or obj.get("parameters") or {}
+    if not name or not isinstance(args, dict):
+        return None
+    return {"tool": name, "arguments": args}
+
+
+def _parse_step(text: str) -> tuple[str, dict[str, Any] | str]:
+    """Return either ('tool', {...}) or ('final', str) or ('noop', raw).
+
+    Loose on purpose: small open models diverge from whatever format you
+    asked for. We accept several fenced and unfenced tool-call shapes and
+    several final-answer prefixes.
+    """
+    final_match = _first_final_match(text)
+
+    fenced = _JSON_BLOCK_RE.search(text)
+    if fenced is not None:
+        json_start = fenced.start()
+        json_body = fenced.group(1)
+    else:
+        bare = _find_bare_json(text)
+        if bare is None:
+            json_start = None
+            json_body = None
+        else:
+            json_start, json_body = bare
+
+    # Prefer whichever appears first in the output — if the model emits a
+    # tool call and THEN declares a final answer in the same turn, run the
+    # tool first (the final answer would have been premature anyway).
+    if final_match and (json_start is None or final_match.start() < json_start):
         return "final", final_match.group(1).strip()
-    if json_match:
+    if json_body is not None:
         try:
-            obj = json.loads(json_match.group(1))
+            obj = json.loads(json_body)
         except json.JSONDecodeError as exc:
             return "noop", f"JSON parse error: {exc}"
-        if "tool" not in obj or "arguments" not in obj:
-            return "noop", "Tool call missing `tool` or `arguments` field."
-        return "tool", obj
+        normalized = _normalize_tool_obj(obj)
+        if normalized is None:
+            return "noop", "Tool call missing a recognizable name/arguments pair."
+        return "tool", normalized
     return "noop", text.strip()
 
 

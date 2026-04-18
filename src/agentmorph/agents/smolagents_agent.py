@@ -111,8 +111,27 @@ def _wrap_model(loaded_model: Any) -> Any:
     # has shifted across versions; the safest bet is to construct via the
     # class and overwrite fields.
     class _Wrapped(TransformersModel):
+        # Class-level defaults for every attribute smolagents' `Model` base
+        # class normally sets during `__init__`. We skip that `__init__`
+        # (otherwise the parent tries to re-download the weights we already
+        # hold), so any attribute it would have set must be pre-declared
+        # here or smolagents hits AttributeError on first call.
+        #
+        # If smolagents adds a new required attribute in a future version,
+        # the fix is to add it to this class block — not to revert to the
+        # parent constructor.
+        flatten_messages_as_text = False          # we drive apply_chat_template ourselves
+        _custom_role_conversions: dict | None = None
+        tool_name_key = "name"
+        tool_arguments_key = "arguments"
+        model_kwargs: dict = {}
+        stream = False
+        structured_generation_provider = False
+
         def __init__(self) -> None:
-            # Skip the parent constructor — we already hold the weights.
+            # Deliberately skip TransformersModel.__init__ (it would reload
+            # the weights). The class attrs above cover Model.__init__'s
+            # side effects.
             self.model_id = loaded_model.spec.hf_repo
             self.model = loaded_model.model
             self.tokenizer = loaded_model.tokenizer
