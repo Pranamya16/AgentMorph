@@ -64,18 +64,83 @@ def _tool_to_structured(tool: Tool) -> Any:
 def _wrap_chat_model(loaded_model: Any, *, temperature: float, max_new_tokens: int) -> Any:
     """Return a `BaseChatModel`-compatible wrapper using transformers directly.
 
-    Avoids the version churn of `langchain-huggingface` by subclassing
-    `BaseChatModel` with a minimal `_generate` that delegates to
-    `LoadedModel.chat`.
+    Implements:
+      * `_generate` that delegates to `LoadedModel.chat`
+      * `bind_tools` that returns a tool-aware copy of the wrapper
+        (`create_react_agent` calls this — without it LangGraph raises
+        `NotImplementedError` and we get zero finished trajectories)
+      * text-level tool-call parsing: when tools are bound, we inject a
+        system message teaching the model our JSON-fenced tool-call format,
+        then parse any matching block out of the generated text and surface
+        it as a structured `AIMessage.tool_calls` entry. This is what
+        `create_react_agent`'s ReAct loop expects to dispatch tools.
     """
+    import json as _json
+    import re as _re
+    import uuid as _uuid
+
     from langchain_core.language_models.chat_models import BaseChatModel
     from langchain_core.messages import AIMessage, BaseMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
 
+    # Matches ``` or ```json / ```python fenced JSON, plus a bare {...} fallback.
+    _FENCED_JSON = _re.compile(r"```(?:json|python)?\s*(\{.*?\})\s*```", _re.DOTALL)
+    _BARE_JSON = _re.compile(r"(\{[^{}]*\"(?:name|tool)\"\s*:\s*\"[^\"]+\"[^{}]*\})", _re.DOTALL)
+
+    def _tool_docs(tools: list) -> str:
+        lines = []
+        for t in tools:
+            try:
+                arg_names = list(getattr(t, "args_schema").__fields__.keys())  # pydantic v1
+            except Exception:
+                try:
+                    arg_names = list(getattr(t, "args_schema").model_fields.keys())  # pydantic v2
+                except Exception:
+                    arg_names = []
+            args = ", ".join(arg_names)
+            lines.append(f"- {t.name}({args}) — {t.description}")
+        return "\n".join(lines)
+
+    def _tool_system_prompt(tools: list) -> str:
+        return (
+            "You have access to these tools:\n"
+            f"{_tool_docs(tools)}\n\n"
+            "To call a tool, respond with EXACTLY one JSON object in a fenced block:\n"
+            "```json\n"
+            '{"name": "<tool_name>", "arguments": {"<arg>": <value>, ...}}\n'
+            "```\n"
+            "When you have the final answer, respond in plain text (no JSON)."
+        )
+
+    def _parse_tool_call(text: str, allowed_names: set[str]) -> dict | None:
+        """Return {name, args} if `text` contains a tool-call JSON block, else None."""
+        m = _FENCED_JSON.search(text) or _BARE_JSON.search(text)
+        if not m:
+            return None
+        try:
+            obj = _json.loads(m.group(1))
+        except _json.JSONDecodeError:
+            return None
+        name = obj.get("name") or obj.get("tool")
+        args = obj.get("arguments") or obj.get("args") or {}
+        if not name or name not in allowed_names or not isinstance(args, dict):
+            return None
+        return {"name": name, "args": args}
+
     class _LocalChat(BaseChatModel):
+        # Make these regular fields so pydantic v2 is happy on BaseChatModel.
+        bound_tools: list = []
+
         @property
         def _llm_type(self) -> str:
             return f"agentmorph-{loaded_model.spec.id}"
+
+        def bind_tools(self, tools, **_kwargs):  # type: ignore[override]
+            # `create_react_agent` calls this once to register tools. Return
+            # a copy so the shared instance stays untools-aware.
+            new = _LocalChat()
+            new.bound_tools = list(tools)
+            return new
 
         def _generate(
             self,
@@ -84,7 +149,11 @@ def _wrap_chat_model(loaded_model: Any, *, temperature: float, max_new_tokens: i
             run_manager: Any | None = None,
             **kwargs: Any,
         ) -> ChatResult:
-            conv = []
+            conv: list[dict[str, str]] = []
+
+            if self.bound_tools:
+                conv.append({"role": "system", "content": _tool_system_prompt(self.bound_tools)})
+
             for m in messages:
                 role = {
                     "human": "user",
@@ -92,14 +161,42 @@ def _wrap_chat_model(loaded_model: Any, *, temperature: float, max_new_tokens: i
                     "system": "system",
                     "tool": "tool",
                 }.get(m.type, "user")
-                conv.append({"role": role, "content": m.content if isinstance(m.content, str) else str(m.content)})
+                # LangGraph's tool messages carry name + content; fold them into
+                # a user-visible observation so the next turn can see the result.
+                if m.type == "tool":
+                    tool_name = getattr(m, "name", "tool")
+                    conv.append({
+                        "role": "user",
+                        "content": f"Tool `{tool_name}` returned:\n{m.content}",
+                    })
+                    continue
+                conv.append({
+                    "role": role,
+                    "content": m.content if isinstance(m.content, str) else str(m.content),
+                })
+
             text = loaded_model.chat(
                 conv,
                 max_new_tokens=max_new_tokens,
                 temperature=temperature,
                 stop=stop,
             )
-            return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
+
+            allowed = {t.name for t in self.bound_tools} if self.bound_tools else set()
+            parsed = _parse_tool_call(text, allowed)
+            if parsed is not None:
+                ai = AIMessage(
+                    content="",
+                    tool_calls=[{
+                        "name": parsed["name"],
+                        "args": parsed["args"],
+                        "id": f"call_{_uuid.uuid4().hex[:12]}",
+                        "type": "tool_call",
+                    }],
+                )
+            else:
+                ai = AIMessage(content=text)
+            return ChatResult(generations=[ChatGeneration(message=ai)])
 
     return _LocalChat()
 
