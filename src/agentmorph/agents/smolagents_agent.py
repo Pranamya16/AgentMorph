@@ -157,20 +157,46 @@ def _wrap_model(loaded_model: Any) -> Any:
             self.last_output_token_count = 0
 
         def __call__(self, messages, stop_sequences=None, **kwargs):  # type: ignore[override]
+            # Flatten any structured content chunks (smolagents stores assistant
+            # outputs as `[{"type": "text", "text": "..."}]` internally; when
+            # those get echoed back on subsequent turns we see a list here).
+            conv: list[dict[str, str]] = []
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if isinstance(content, list):
+                    parts = []
+                    for chunk in content:
+                        if isinstance(chunk, dict):
+                            parts.append(str(chunk.get("text") or chunk.get("content") or ""))
+                        else:
+                            parts.append(str(chunk))
+                    content = "\n".join(parts)
+                conv.append({"role": role, "content": str(content)})
+
             text = loaded_model.chat(
-                [{"role": m["role"], "content": m["content"]} for m in messages],
-                max_new_tokens=kwargs.get("max_new_tokens", 384),
+                conv,
+                max_new_tokens=kwargs.get("max_new_tokens", 256),
                 temperature=kwargs.get("temperature", 0.0),
                 stop=list(stop_sequences) if stop_sequences else None,
             )
-            # smolagents expects a ChatMessage-like object; most versions accept
-            # a plain string with a .content attribute. Use a tiny shim.
-            class _Msg:
-                role = "assistant"
-                def __init__(self, content: str) -> None:
-                    self.content = content
-                    self.tool_calls = None
-            return _Msg(text)
+
+            # Return a real smolagents ChatMessage so round-tripping through
+            # the agent's memory preserves `.content` as a plain string.
+            # Falling back to a minimal shim keeps the adapter importable on
+            # older smolagents versions that don't export ChatMessage.
+            try:
+                from smolagents.models import ChatMessage  # type: ignore
+                return ChatMessage(role="assistant", content=text, tool_calls=None)
+            except Exception:
+                class _Msg:
+                    role = "assistant"
+                    def __init__(self, content: str) -> None:
+                        self.content = content
+                        self.tool_calls = None
+                    def __str__(self) -> str:
+                        return self.content
+                return _Msg(text)
 
     return _Wrapped()
 

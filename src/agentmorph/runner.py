@@ -104,7 +104,30 @@ class RunManifest:
 
 
 DEFAULT_OUT_DIR = Path("runs/stage1_baseline")
-DEFAULT_MAX_STEPS = 8
+# Keep the framework adapters' history short enough that T4 KV caches don't
+# blow up. smolagents/LangGraph append every prior turn to the next prompt,
+# so input context grows by thousands of tokens per step. With max_steps=4
+# and max_new_tokens=256, peak context stays under ~10K — well inside T4.
+DEFAULT_MAX_STEPS = 4
+
+
+def _reclaim_vram() -> None:
+    """Best-effort cleanup between scenarios.
+
+    Forces Python GC then returns CUDA allocator blocks to the pool so the
+    next scenario starts with the largest possible contiguous VRAM region.
+    Silent if torch isn't importable (CPU-only / CI paths).
+    """
+    import gc
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            # ipc_collect is cheap and helps on long runs.
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
 
 
 # -- Core runner ------------------------------------------------------------
@@ -258,6 +281,13 @@ def run_baseline(
                             manifest.save(manifest_path)
                             ran_cells += 1
                             done_cells += 1
+
+                            # Free the KV cache + activation buffers between
+                            # scenarios. Without this, T4 runs accumulate
+                            # fragmented VRAM over ~3 scenarios and OOM on
+                            # the 4th — which is exactly what we saw in the
+                            # first real smolagents sweep.
+                            _reclaim_vram()
                     finally:
                         writer.close()
         finally:

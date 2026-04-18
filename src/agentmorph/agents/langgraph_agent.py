@@ -20,6 +20,24 @@ from agentmorph.trajectories import Trajectory
 
 # -- JSON Schema → pydantic for StructuredTool args_schema -------------------
 
+_NULLISH = {"null", "none", "nil", "", "undefined", "n/a"}
+
+
+def _coerce_arg(value: Any) -> Any:
+    """Coerce string-encoded primitives from tool-calling LLMs.
+
+    Small open models routinely emit JSON args like:
+      {"category": "null", "min_price": "0", "limit": "1"}
+    i.e. strings instead of proper JSON null/int. Treat common string spellings
+    of null as None so pydantic drops them back to the field default, and let
+    pydantic itself handle "0" -> 0 / "50" -> 50.0 via its default coercion.
+    """
+    if isinstance(value, str):
+        if value.strip().lower() in _NULLISH:
+            return None
+    return value
+
+
 def _tool_to_structured(tool: Tool) -> Any:
     """Wrap our Tool as a LangChain StructuredTool."""
     from langchain_core.tools import StructuredTool
@@ -49,7 +67,8 @@ def _tool_to_structured(tool: Tool) -> Any:
     model_cls = create_model(f"{tool.name}_Args", **fields)  # type: ignore[arg-type]
 
     def _call(**kwargs: Any) -> Any:
-        return tool.invoke({k: v for k, v in kwargs.items() if v is not None})
+        cleaned = {k: _coerce_arg(v) for k, v in kwargs.items()}
+        return tool.invoke({k: v for k, v in cleaned.items() if v is not None})
 
     return StructuredTool.from_function(
         func=_call,

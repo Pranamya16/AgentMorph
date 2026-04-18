@@ -23,12 +23,18 @@ from agentmorph.trajectories import Trajectory
 
 @dataclass
 class AgentConfig:
-    """Knobs shared by all adapters."""
+    """Knobs shared by all adapters.
+
+    Defaults are sized for Colab T4 + small open models. The framework
+    adapters (smolagents / LangGraph) both append prior turns to each new
+    prompt, so `max_steps=4` and `max_new_tokens=256` keep peak context
+    under ~10K tokens — well inside T4's VRAM headroom at 4-bit.
+    """
 
     model_id: str                       # "Llama-3.2-3B" etc — matches models.MODEL_REGISTRY
     framework_id: str                   # "native" / "smolagents" / "langgraph"
-    max_steps: int = 8
-    max_new_tokens: int = 384
+    max_steps: int = 4
+    max_new_tokens: int = 256
     temperature: float = 0.0
     system_prompt: str | None = None
 

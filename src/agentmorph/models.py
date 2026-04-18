@@ -21,6 +21,13 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+# Opt into PyTorch's expandable-segments allocator before torch is imported
+# anywhere else. This dramatically reduces VRAM fragmentation on long runs
+# where we free/reallocate between scenarios — exactly our Stage 1 shape.
+# The CUDA OOM error that hit the first smolagents sweep recommended this
+# explicitly.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 if TYPE_CHECKING:  # pragma: no cover — typing only
     import torch
     from transformers import PreTrainedModel, PreTrainedTokenizerBase
