@@ -117,16 +117,32 @@ def _wrap_model(loaded_model: Any) -> Any:
         # hold), so any attribute it would have set must be pre-declared
         # here or smolagents hits AttributeError on first call.
         #
-        # If smolagents adds a new required attribute in a future version,
-        # the fix is to add it to this class block — not to revert to the
-        # parent constructor.
+        # The __getattr__ fallback below breaks the whack-a-mole cycle where
+        # each new smolagents release adds another *_kwargs attr we haven't
+        # listed — any unknown attribute ending in `_kwargs` defaults to
+        # an empty dict, which is what the base class would have set anyway.
         flatten_messages_as_text = False          # we drive apply_chat_template ourselves
         _custom_role_conversions: dict | None = None
         tool_name_key = "name"
         tool_arguments_key = "arguments"
         model_kwargs: dict = {}
+        apply_chat_template_kwargs: dict = {}
+        tokenizer_kwargs: dict = {}
+        generation_kwargs: dict = {}
         stream = False
         structured_generation_provider = False
+
+        def __getattr__(self, name: str) -> Any:
+            # Only called when normal attribute lookup fails. Provide safe
+            # defaults for the `*_kwargs` pattern so smolagents' internals
+            # don't crash on attrs we haven't explicitly listed.
+            if name.startswith("__"):
+                raise AttributeError(name)
+            if name.endswith("_kwargs"):
+                return {}
+            # Anything else: propagate AttributeError so smolagents falls
+            # back to its own defaults rather than getting a silent None.
+            raise AttributeError(name)
 
         def __init__(self) -> None:
             # Deliberately skip TransformersModel.__init__ (it would reload

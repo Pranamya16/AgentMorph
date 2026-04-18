@@ -83,9 +83,40 @@ def _wrap_chat_model(loaded_model: Any, *, temperature: float, max_new_tokens: i
     from langchain_core.messages import AIMessage, BaseMessage
     from langchain_core.outputs import ChatGeneration, ChatResult
 
-    # Matches ``` or ```json / ```python fenced JSON, plus a bare {...} fallback.
-    _FENCED_JSON = _re.compile(r"```(?:json|python)?\s*(\{.*?\})\s*```", _re.DOTALL)
-    _BARE_JSON = _re.compile(r"(\{[^{}]*\"(?:name|tool)\"\s*:\s*\"[^\"]+\"[^{}]*\})", _re.DOTALL)
+    # Matches the START of a JSON tool-call object inside any fenced or
+    # unfenced region. The actual end of the object is found via balanced-
+    # brace scan (Python re can't balance `{}`), so nested `arguments: {...}`
+    # and multi-call `;`-separated blobs both resolve correctly.
+    _JSON_OBJ_START = _re.compile(r'\{\s*"(?:name|tool)"\s*:', _re.DOTALL)
+
+    def _scan_balanced_json(text: str) -> str | None:
+        """Return the first balanced `{...}` object starting with a `name`
+        or `tool` key, or None if not found."""
+        for m in _JSON_OBJ_START.finditer(text):
+            start = m.start()
+            depth = 0
+            in_string = False
+            escape = False
+            for i in range(start, len(text)):
+                ch = text[i]
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\" and in_string:
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        return text[start : i + 1]
+        return None
 
     def _tool_docs(tools: list) -> str:
         lines = []
@@ -113,16 +144,21 @@ def _wrap_chat_model(loaded_model: Any, *, temperature: float, max_new_tokens: i
         )
 
     def _parse_tool_call(text: str, allowed_names: set[str]) -> dict | None:
-        """Return {name, args} if `text` contains a tool-call JSON block, else None."""
-        m = _FENCED_JSON.search(text) or _BARE_JSON.search(text)
-        if not m:
+        """Return {name, args} for the FIRST tool-call JSON object in `text`.
+
+        Finds the object via balanced-brace scan (so nested `arguments`
+        dicts don't confuse it), then validates the name is one of the
+        bound tools. Returns None if no valid tool call is found.
+        """
+        raw = _scan_balanced_json(text)
+        if raw is None:
             return None
         try:
-            obj = _json.loads(m.group(1))
+            obj = _json.loads(raw)
         except _json.JSONDecodeError:
             return None
         name = obj.get("name") or obj.get("tool")
-        args = obj.get("arguments") or obj.get("args") or {}
+        args = obj.get("arguments") or obj.get("args") or obj.get("parameters") or {}
         if not name or name not in allowed_names or not isinstance(args, dict):
             return None
         return {"name": name, "args": args}
