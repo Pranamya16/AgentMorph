@@ -181,13 +181,19 @@ def _wrap_model(loaded_model: Any) -> Any:
                 stop=list(stop_sequences) if stop_sequences else None,
             )
 
-            # Return a real smolagents ChatMessage so round-tripping through
-            # the agent's memory preserves `.content` as a plain string.
-            # Falling back to a minimal shim keeps the adapter importable on
-            # older smolagents versions that don't export ChatMessage.
+            # Recent smolagents versions normalize assistant content into
+            # structured chunks `[{"type": "text", "text": "..."}]` when
+            # storing turns in agent memory. If we return a plain string,
+            # smolagents may wrap it opaquely and the next turn's parser
+            # sees the Python repr of that list and dies on JSON parse.
+            # Returning already-structured content sidesteps the wrapping.
             try:
                 from smolagents.models import ChatMessage  # type: ignore
-                return ChatMessage(role="assistant", content=text, tool_calls=None)
+                return ChatMessage(
+                    role="assistant",
+                    content=[{"type": "text", "text": text}],
+                    tool_calls=None,
+                )
             except Exception:
                 class _Msg:
                     role = "assistant"

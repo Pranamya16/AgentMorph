@@ -106,9 +106,10 @@ class RunManifest:
 DEFAULT_OUT_DIR = Path("runs/stage1_baseline")
 # Keep the framework adapters' history short enough that T4 KV caches don't
 # blow up. smolagents/LangGraph append every prior turn to the next prompt,
-# so input context grows by thousands of tokens per step. With max_steps=4
-# and max_new_tokens=256, peak context stays under ~10K — well inside T4.
-DEFAULT_MAX_STEPS = 4
+# so input context grows by thousands of tokens per step. With max_steps=3
+# and max_new_tokens=192, peak context stays under ~15K — which still fits
+# on T4 at 4-bit even with Llama-3.2-3B's full 30-tool system prompt.
+DEFAULT_MAX_STEPS = 3
 
 
 def _reclaim_vram() -> None:

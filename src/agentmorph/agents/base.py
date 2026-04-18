@@ -33,8 +33,8 @@ class AgentConfig:
 
     model_id: str                       # "Llama-3.2-3B" etc — matches models.MODEL_REGISTRY
     framework_id: str                   # "native" / "smolagents" / "langgraph"
-    max_steps: int = 4
-    max_new_tokens: int = 256
+    max_steps: int = 3
+    max_new_tokens: int = 192
     temperature: float = 0.0
     system_prompt: str | None = None
 
