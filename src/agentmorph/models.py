@@ -100,6 +100,35 @@ def get_spec(model_id: str) -> ModelSpec:
 # -- Loader -----------------------------------------------------------------
 
 
+def _fold_system_into_user(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Fold every `system` message into the content of the next `user` message.
+
+    Gemma-family chat templates reject the `system` role. Instead of
+    special-casing Gemma everywhere upstream, we reshape the message list at
+    the tokenizer boundary. Semantics are preserved: the system instructions
+    become the prefix of the user turn they were meant to condition.
+    """
+    out: list[dict[str, str]] = []
+    pending: list[str] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = str(m.get("content", ""))
+        if role == "system":
+            pending.append(content)
+            continue
+        if role == "user" and pending:
+            merged = "\n\n".join(pending + [content])
+            out.append({"role": "user", "content": merged})
+            pending = []
+        else:
+            out.append({"role": role, "content": content})
+    if pending:
+        # No user turn followed — prepend the accumulated system text as a
+        # standalone user message so the generation still sees it.
+        out.insert(0, {"role": "user", "content": "\n\n".join(pending)})
+    return out
+
+
 @dataclass
 class LoadedModel:
     """Framework-agnostic handle returned by `load_model`.
@@ -130,11 +159,30 @@ class LoadedModel:
         import torch  # lazy
 
         tok = self.tokenizer
-        prompt_ids = tok.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            return_tensors="pt",
-        ).to(self.model.device)
+
+        # Gemma-2's chat template rejects the "system" role outright
+        # (`TemplateError: System role not supported`). Llama, Qwen, and Phi
+        # accept it. Try once with the message list as-is; on a chat-template
+        # error, fold system messages into the first user message and retry.
+        try:
+            prompt_ids = tok.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                return_tensors="pt",
+            )
+        except Exception as exc:
+            err = str(exc)
+            if "System role" in err or "system role" in err or "Only user and model roles" in err:
+                folded = _fold_system_into_user(messages)
+                prompt_ids = tok.apply_chat_template(
+                    folded,
+                    add_generation_prompt=True,
+                    return_tensors="pt",
+                )
+            else:
+                raise
+
+        prompt_ids = prompt_ids.to(self.model.device)
 
         gen_kwargs = dict(
             max_new_tokens=max_new_tokens,

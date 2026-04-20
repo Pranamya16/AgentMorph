@@ -195,6 +195,142 @@ def _parse_step(text: str) -> tuple[str, dict[str, Any] | str]:
     return "noop", text.strip()
 
 
+# Every fenced block (any language tag), greedy enough to include bodies with
+# multiple concatenated JSON objects inside.
+_ALL_FENCED_RE = re.compile(
+    r"```(?:json|python|tool_code|tool)?\s*(.*?)\s*```",
+    re.DOTALL,
+)
+
+
+def _find_balanced_end(text: str, start: int) -> int:
+    """Index of the `}` that closes the `{` at `start`, or -1 on mismatch."""
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\" and in_string:
+            escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _all_json_objects_in(body: str) -> list[str]:
+    """Greedily pull every balanced `{...}` object out of `body`."""
+    out: list[str] = []
+    i = 0
+    while i < len(body):
+        start = body.find("{", i)
+        if start < 0:
+            break
+        end = _find_balanced_end(body, start)
+        if end < 0:
+            break
+        out.append(body[start : end + 1])
+        i = end + 1
+    return out
+
+
+def _strip_nullish_args(args: dict[str, Any]) -> dict[str, Any]:
+    """Match LangGraph's behavior — drop None / "null" string args.
+
+    Small open models routinely emit `"min_price": null` or `"category":
+    "null"`. Our JSON-Schema validator rejects `null` where a `"number"` is
+    expected, so the tool call fails before the function body even runs.
+    Dropping the key lets the function's Python default (usually `None`)
+    apply, which every ecommerce tool handles correctly.
+    """
+    nullish = {"null", "none", "nil", "undefined", "n/a", ""}
+    out: dict[str, Any] = {}
+    for k, v in args.items():
+        if v is None:
+            continue
+        if isinstance(v, str) and v.strip().lower() in nullish:
+            continue
+        out[k] = v
+    return out
+
+
+def _parse_multi_step(
+    text: str,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Return (tool_calls, final_answer).
+
+    Handles every format-divergence we've observed from 3-9B models:
+      1. Multiple fenced blocks in one turn (Qwen pattern)
+      2. One fenced block with multiple JSON objects inside (Llama pattern)
+      3. A single bare JSON object in free text
+      4. Mixed final-answer + tool-call
+      5. `null`-valued args (cleaned via _strip_nullish_args)
+
+    If tool calls and a final answer both appear, tool calls win — the final
+    was almost certainly premature.
+    """
+    raw_objects: list[str] = []
+
+    # Collect every fenced block's contents.
+    for m in _ALL_FENCED_RE.finditer(text):
+        body = m.group(1).strip()
+        # Try the whole body as JSON first.
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                raw_objects.append(body)
+                continue
+            if isinstance(parsed, list):
+                # A JSON array of tool calls — accept each dict.
+                for item in parsed:
+                    if isinstance(item, dict):
+                        raw_objects.append(json.dumps(item))
+                continue
+        except json.JSONDecodeError:
+            pass
+        # Fallback: walk the fenced body looking for balanced {...} objects.
+        raw_objects.extend(_all_json_objects_in(body))
+
+    # If nothing fenced worked, try a bare scan in the free text.
+    if not raw_objects:
+        bare = _find_bare_json(text)
+        if bare is not None:
+            raw_objects.append(bare[1])
+
+    # Parse + normalize each raw object.
+    tool_calls: list[dict[str, Any]] = []
+    for raw in raw_objects:
+        try:
+            obj = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        normalized = _normalize_tool_obj(obj)
+        if normalized is None:
+            continue
+        normalized["arguments"] = _strip_nullish_args(normalized.get("arguments") or {})
+        tool_calls.append(normalized)
+
+    final_answer: str | None = None
+    if not tool_calls:
+        m = _first_final_match(text)
+        if m is not None:
+            final_answer = m.group(1).strip()
+
+    return tool_calls, final_answer
+
+
 @dataclass
 class NativeAgent:
     """Manual ReAct loop over our LoadedModel + ToolRegistry."""
@@ -238,40 +374,50 @@ class NativeAgent:
                 trajectory.add_thought(reply)
                 messages.append({"role": "assistant", "content": reply})
 
-                kind, payload = _parse_step(reply)
-                if kind == "final":
-                    trajectory.add_final_answer(payload)  # type: ignore[arg-type]
-                    break
-                if kind == "tool":
-                    assert isinstance(payload, dict)
-                    name = payload["tool"]
-                    args = payload["arguments"] or {}
-                    trajectory.add_tool_call(name, args)
-                    result = self.tools.call(name, args)
-                    trajectory.add_tool_result(
-                        name, args, output=result.output, error=result.error
-                    )
-                    messages.append(
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Tool `{name}` returned:\n"
-                                f"{json.dumps(result.output, default=str) if result.ok else 'ERROR: ' + str(result.error)}"
-                            ),
-                        }
-                    )
-                    continue
-                # Malformed output — nudge the model once, then stop.
-                trajectory.add_error(f"unparseable step: {payload}")
-                messages.append(
-                    {
+                # Parse every tool call the model asked for in this turn.
+                # Small models routinely emit 2-3 calls per turn (Qwen: multi
+                # fenced blocks; Llama: multi objects in one block). Executing
+                # them all inline avoids the loop-until-max_steps trap where
+                # the model thinks it already ran things we never dispatched.
+                tool_calls, final_answer = _parse_multi_step(reply)
+
+                if tool_calls:
+                    observations: list[str] = []
+                    for call in tool_calls:
+                        name = call["tool"]
+                        args = call.get("arguments") or {}
+                        trajectory.add_tool_call(name, args)
+                        result = self.tools.call(name, args)
+                        trajectory.add_tool_result(
+                            name, args, output=result.output, error=result.error
+                        )
+                        if result.ok:
+                            try:
+                                rendered = json.dumps(result.output, default=str)
+                            except (TypeError, ValueError):
+                                rendered = repr(result.output)
+                        else:
+                            rendered = f"ERROR: {result.error}"
+                        observations.append(f"Tool `{name}` returned:\n{rendered}")
+                    messages.append({
                         "role": "user",
-                        "content": (
-                            "Your last message was not a valid tool call or FINAL answer. "
-                            "Respond with a ```json {...}``` block or `FINAL: ...`."
-                        ),
-                    }
-                )
+                        "content": "\n\n".join(observations),
+                    })
+                    continue
+
+                if final_answer is not None:
+                    trajectory.add_final_answer(final_answer)
+                    break
+
+                # Neither tool calls nor final answer found — nudge once.
+                trajectory.add_error(f"unparseable step: {reply.strip()[:200]}")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "Your last message was not a valid tool call or FINAL answer. "
+                        "Respond with a ```json {...}``` block or `FINAL: ...`."
+                    ),
+                })
             else:
                 trajectory.add_error("max_steps exhausted without a FINAL answer")
         except Exception as exc:  # pragma: no cover — defensive
