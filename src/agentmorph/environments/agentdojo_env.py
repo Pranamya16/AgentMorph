@@ -108,12 +108,36 @@ def _discover_suites() -> dict[str, Any]:
             "`pip install -q agentdojo`  (or the `[agentdojo]` extra of agentmorph)."
         ) from exc
 
-    # Shape 1: get_suites() function.
+    # The official suites are registered as a side effect of importing
+    # `agentdojo.default_suites`. Without this, `get_suites()` returns {}.
+    try:
+        import agentdojo.default_suites  # noqa: F401  — side-effect import
+    except Exception:  # pragma: no cover
+        pass
+
+    # Shape 1 (most modern, post default_suites import): get_suites() returns
+    # a populated dict of {name -> TaskSuite}.
     try:
         from agentdojo.task_suite import get_suites  # type: ignore
         suites = get_suites()
         if suites:
             return dict(suites)
+    except Exception:  # pragma: no cover
+        pass
+
+    # Shape 1b: get_suite(name) for each of the four standard suites.
+    try:
+        from agentdojo.task_suite import get_suite  # type: ignore
+        out: dict[str, Any] = {}
+        for name in ("workspace", "slack", "travel", "banking"):
+            try:
+                s = get_suite(name)
+                if s is not None:
+                    out[name] = s
+            except Exception:
+                continue
+        if out:
+            return out
     except Exception:  # pragma: no cover
         pass
 
@@ -130,7 +154,7 @@ def _discover_suites() -> dict[str, Any]:
         import importlib
         import pkgutil
         import agentdojo.task_suites as _ts  # type: ignore
-        out: dict[str, Any] = {}
+        out = {}
         for mod_info in pkgutil.iter_modules(_ts.__path__):
             name = mod_info.name
             try:
