@@ -15,19 +15,19 @@ Every scope cut below preserves this claim.
 
 ## 2. What changes vs. the full plan
 
-The intro doc targets ~25 rules, 12,500 pairs, 1,500+ bugs, 5 closed-model transfer study. That is a 3–6 month scope. For a 16-day cut that still submits a credible D&B paper:
+The intro doc targets ~25 rules, 12,500 pairs, 1,500+ bugs, 5 closed-model transfer study. That is a 3–6 month scope. The submission cut below is what we actually commit to by May 4; it is the final scope, not a staging point toward a fuller camera-ready.
 
-| Dimension | Full plan | **16-day submission** | Post-submission camera-ready / fallback |
-|---|---|---|---|
-| Metamorphic rules | 25 | **10 core** | 25 |
-| Mutation pairs | 12,500 | **2,500** | 12,500 |
-| Bugs in HF release | 1,500+ | **300–500** | 1,500+ |
-| Models run | 5 | **4** (defer Phi-4 — tight on T4) | 5 |
-| Frameworks | smolagents + LangGraph | **native + LangGraph**; smolagents on Qwen+/Gemma+/Phi-4 only | both on all 5 |
-| Environments | AgentDojo + e-commerce | both (ecommerce primary, 1 AgentDojo sweep) | both, full sweeps |
-| Transfer study | 300 bugs × 5 closed models | **100 bugs × 3 models** (Claude Haiku, Gemini 2.5 Flash, Groq Llama-3.3-70B) | 300 × 5 |
+| Dimension | Full plan (intro doc) | **May-4 submission (final)** |
+|---|---|---|
+| Metamorphic rules | 25 | **10** |
+| Mutation pairs | 12,500 | **1,000** (5 models × 10 rules × 20 scenarios) |
+| Bugs in HF release | 1,500+ | **~150** (at ~15 % divergence on 1,000 pairs) |
+| Models run | 5 | **5** (Llama-3.2-3B, Qwen2.5-7B, Llama-3.1-8B, Gemma-2-9B, Phi-4 — all confirmed loading in Stage 1) |
+| Frameworks | smolagents + LangGraph | **native + LangGraph**; smolagents on Qwen+/Gemma+/Phi-4 only (T4 context budget blocks it on small models) |
+| Environments | AgentDojo + e-commerce | both (ecommerce primary, 1 AgentDojo canary sweep) |
+| Transfer study | 300 bugs × 5 closed models | **100 bugs × 3 closed models** (Claude Haiku, Gemini 2.5 Flash, Groq Llama-3.3-70B) |
 
-Novelty survives every cut. "First oracle-free trajectory-level metamorphic testing for agents" holds at 10 rules.
+Novelty survives every cut. "First oracle-free trajectory-level metamorphic testing for agents" holds at 10 rules. 10 rules × 5 models is the load-bearing contribution; the pair-count reduction from 2,500 → 1,000 is the compression that lets a solo researcher close the loop by Apr 30 with May 1-4 left for writing.
 
 ## 3. Current state (Apr 18)
 
