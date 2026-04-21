@@ -105,25 +105,30 @@ python -m agentmorph.runner --hf-cache-dir /content/drive/MyDrive/AgentMorph/hf_
 
 Trajectories land in `<out_dir>/trajectories/<model>__<framework>__<env>.jsonl`; `<out_dir>/manifest.json` tracks completed (model, framework, env, scenario) cells and makes the runner safe to kill and re-launch.
 
-## What needs a GPU vs what doesn't
+## GPU preferred, CPU fallback everywhere
 
-The package is designed so **everything except actual model inference runs on CPU**. Respect this split — don't force GPU where it isn't needed.
+**GPU is the primary execution target** — 4-bit nf4 quantization via bitsandbytes on a T4 is how Stage 1/3 actually runs at scale. But the **entire pipeline must also run on CPU as a degraded fallback**, so a developer without a GPU can exercise adapters, mutation rules, runner logic, and even small-model inference end-to-end.
 
-**CPU-only (no torch/CUDA required):**
-- `agentmorph` package imports, tool definitions, 30-tool ecommerce suite
-- Agent adapter orchestration (parsing, tool dispatch, trajectory logging)
-- AgentDojo adapter suite discovery + scenario enumeration
-- Trajectory JSONL read/write, manifest handling, resume logic
-- All unit tests (53 pass without torch installed)
-- Stage 2 mutation rules (text transforms) and equivalence checkers
-- Figure generation, HF dataset upload, CI
+How the fallback works:
 
-**GPU required (T4 or better):**
-- `models.load_model()` — 4-bit weight loading via `BitsAndBytesConfig`
-- `LoadedModel.chat()` — `model.generate()` on the GPU
-- Any `python -m agentmorph.runner` invocation that actually runs a model (i.e. not `--dry-run`)
+- `load_model()` auto-detects `torch.cuda.is_available()`. On CUDA it loads at 4-bit nf4. On CPU it falls back to **fp32 without quantization** (bitsandbytes requires CUDA — there's no way to keep 4-bit without it), prints a loud warning about the ~100× speed penalty, and continues.
+- `LoadedModel.chat()` uses `self.model.device` throughout — already device-agnostic.
+- `unload_model()` + `_reclaim_vram()` gate their CUDA calls behind `torch.cuda.is_available()` — safe on CPU.
+- Notebooks print GPU availability in §1 as a warning, never a hard assert. Only the `runner` subprocess actually needs the decision — and `load_model()` makes it automatically.
 
-**Notebook convention:** hard-assert GPU *only* in cells that invoke the runner. Pre-sweep cells (clone, install, adapter probes, dry-runs, suite discovery) should print a GPU-availability note without failing. The `stage1_agentdojo_canary.ipynb` cell layout is the reference pattern — §1 is a soft check, §7 is a hard assert.
+**Practical CPU-fallback envelope** (Colab free tier, ~12 GB RAM):
+
+- ✅ `agentmorph` package imports, tool definitions, 30-tool ecommerce suite, agent adapters, trajectory I/O, manifest, mutation rules + equivalence checkers, figure generation, unit tests.
+- ✅ `load_model("Llama-3.2-3B")` in fp32 ≈ ~6 GB RAM, inference minutes-per-token — viable for small-scale smoke runs.
+- ⚠️ `load_model("Qwen2.5-7B")` or larger in fp32 ≈ 14 GB+ RAM — **will likely OOM on standard Colab CPU**. These need either more RAM or a GPU.
+
+**Test the fallback without a GPU:**
+```
+python -m agentmorph.runner --model Llama-3.2-3B --framework native --env ecommerce --n-scenarios 1
+```
+Works locally on any machine with 8+ GB RAM. The runner will print the CPU fallback warning and complete (slowly) one scenario.
+
+**Do NOT add GPU hard-asserts to new notebook cells or Python modules.** If a cell happens to need CUDA (e.g. a hypothetical fused-kernel accelerator cell), let `load_model()` / torch raise the underlying error with its own message. The rest of the pipeline stays CPU-compatible.
 
 ## Stage 1 invariants future work must preserve
 

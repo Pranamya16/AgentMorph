@@ -208,20 +208,43 @@ class LoadedModel:
 _LOAD_CACHE: dict[str, LoadedModel] = {}
 
 
+def _choose_load_profile(quantize: bool) -> tuple[str, bool, str]:
+    """Decide (device, quantize_4bit, dtype_name) based on what's available.
+
+    GPU is the preferred path. If CUDA isn't available, we fall back to CPU
+    with no quantization (bitsandbytes requires CUDA) and fp32 compute.
+    CPU inference is ~100x slower than T4 — only useful for development,
+    unit tests, or tiny-model smoke runs. The runner will still work; it
+    just takes minutes per token instead of seconds.
+    """
+    import torch
+    if torch.cuda.is_available():
+        # Preferred path: CUDA + 4-bit nf4 quantization.
+        return "cuda", bool(quantize), "float16"
+    # Fallback: CPU, no bnb quantization, fp32 (fp16 on CPU is unstable).
+    return "cpu", False, "float32"
+
+
 def load_model(
     model_id: str,
     *,
     hf_cache_dir: str | None = None,
     reuse_cached: bool = True,
     quantize: bool = True,
+    force_cpu: bool = False,
 ) -> LoadedModel:
-    """Load a primary model in 4-bit on the current CUDA device.
+    """Load a primary model.
+
+    GPU is the preferred path — 4-bit nf4 quantization on CUDA. The function
+    automatically falls back to CPU (fp32, no quantization) if CUDA isn't
+    available, or if `force_cpu=True`. CPU inference is far slower and uses
+    ~4x more memory than 4-bit GPU, but the entire pipeline still runs,
+    which lets you exercise adapters, mutation rules, and the runner end-
+    to-end without a GPU for development.
 
     `reuse_cached=True` returns the same `LoadedModel` for repeated calls in
     one session — important because Colab T4s can't hold two 7B+ models in
-    memory at once. The baseline runner relies on this.
-
-    If `quantize=False`, falls back to fp16 (only viable for Llama-3.2-3B).
+    memory at once.
     """
     if reuse_cached and model_id in _LOAD_CACHE:
         return _LOAD_CACHE[model_id]
@@ -241,34 +264,56 @@ def load_model(
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
+    # Choose load profile — GPU preferred, CPU fallback.
+    if force_cpu:
+        device, do_quant, dtype_name = "cpu", False, "float32"
+    else:
+        device, do_quant, dtype_name = _choose_load_profile(quantize)
+
+    if device == "cpu":
+        print(
+            f"[agentmorph.models] No CUDA detected; loading {spec.id} on CPU "
+            f"in {dtype_name} without bitsandbytes quantization. "
+            f"Inference will be ~100x slower than a T4 — use for development "
+            f"and small-model smoke runs only."
+        )
+
     model_kwargs: dict[str, Any] = {
         "trust_remote_code": spec.trust_remote_code,
-        "device_map": "auto",
     }
     if cache_dir:
         model_kwargs["cache_dir"] = cache_dir
 
-    if quantize:
-        from transformers import BitsAndBytesConfig
-        model_kwargs["quantization_config"] = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16,
-            bnb_4bit_use_double_quant=True,
-        )
+    if device == "cuda":
+        model_kwargs["device_map"] = "auto"
+        if do_quant:
+            from transformers import BitsAndBytesConfig
+            model_kwargs["quantization_config"] = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+        else:
+            model_kwargs["torch_dtype"] = torch.float16
     else:
-        model_kwargs["torch_dtype"] = torch.float16
+        # CPU: no device_map (accelerate behavior varies on CPU), explicit
+        # fp32 compute, no bnb. `.to("cpu")` is implicit after load.
+        model_kwargs["torch_dtype"] = torch.float32
 
     model = AutoModelForCausalLM.from_pretrained(spec.hf_repo, **model_kwargs)
     model.eval()
+
+    # Ensure we actually know where the model landed.
+    actual_device = "cuda" if next(model.parameters()).is_cuda else "cpu"
 
     loaded = LoadedModel(
         spec=spec,
         model=model,
         tokenizer=tokenizer,
-        device=str(getattr(model, "device", "cuda")),
-        dtype="float16",
-        quantization="nf4-4bit" if quantize else "fp16",
+        device=actual_device,
+        dtype=dtype_name,
+        quantization="nf4-4bit" if (device == "cuda" and do_quant) else dtype_name,
     )
     if reuse_cached:
         _LOAD_CACHE[model_id] = loaded
@@ -276,19 +321,25 @@ def load_model(
 
 
 def unload_model(model_id: str) -> None:
-    """Drop the cached model and free GPU memory.
+    """Drop the cached model and free memory.
 
     Call this between primary models in the baseline runner — T4 VRAM is too
-    small to hold two 7B+ models simultaneously.
+    small to hold two 7B+ models simultaneously. On CPU this still runs gc
+    to release RAM between models.
     """
     loaded = _LOAD_CACHE.pop(model_id, None)
     if loaded is None:
         return
     try:
-        import torch
+        import gc
         del loaded.model
         del loaded.tokenizer
-        torch.cuda.empty_cache()
+        gc.collect()
+        # Only touch CUDA if it's actually available — CPU-only runs would
+        # otherwise trip `torch.cuda.empty_cache()` with no device.
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     except Exception:
         pass
 
