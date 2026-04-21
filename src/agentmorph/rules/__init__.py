@@ -33,7 +33,12 @@ from agentmorph.rules.base import (
     MutationResult,
     Mutator,
 )
-from agentmorph.rules.registry import RULE_IDS, make_mutator
+from agentmorph.rules.registry import (
+    RULE_IDS,
+    available_rules,
+    make_equivalence_checker,
+    make_mutator,
+)
 
 __all__ = [
     "Bug",
@@ -43,5 +48,7 @@ __all__ = [
     "MutationResult",
     "Mutator",
     "RULE_IDS",
+    "available_rules",
+    "make_equivalence_checker",
     "make_mutator",
 ]

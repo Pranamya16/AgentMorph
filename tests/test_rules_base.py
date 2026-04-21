@@ -73,24 +73,30 @@ def test_make_mutator_unknown_rule_raises_keyerror() -> None:
         make_mutator("not-a-real-rule")
 
 
-def test_make_mutator_unimplemented_rule_raises_notimplemented() -> None:
-    # All 10 rules are unimplemented on Apr 20 — any real rule id here
-    # should surface as NotImplementedError (not ImportError).
-    with pytest.raises(NotImplementedError):
-        make_mutator("tool-order-invariance")
-
-
-def test_make_equivalence_checker_mirrors_mutator_errors() -> None:
+def test_make_equivalence_checker_unknown_rule_raises_keyerror() -> None:
     with pytest.raises(KeyError):
         make_equivalence_checker("not-a-real-rule")
-    with pytest.raises(NotImplementedError):
-        make_equivalence_checker("tool-order-invariance")
 
 
-def test_available_rules_reflects_filesystem() -> None:
-    """Before any rule ships, `available_rules()` returns an empty list —
-    it probes each module for importability and skips missing ones."""
-    assert available_rules() == []
+def test_make_mutator_returns_object_with_matching_rule_id() -> None:
+    """All 10 rules ship in Stage 2 — the factory returns a Mutator whose
+    `rule_id` attribute matches the requested id."""
+    for rule_id in RULE_IDS:
+        mut = make_mutator(rule_id)
+        assert mut.rule_id == rule_id, f"mutator rule_id mismatch for {rule_id!r}"
+
+
+def test_make_equivalence_checker_returns_object_with_matching_rule_id() -> None:
+    for rule_id in RULE_IDS:
+        chk = make_equivalence_checker(rule_id)
+        assert chk.rule_id == rule_id
+
+
+def test_available_rules_equals_all_shipped_rules() -> None:
+    """With Stage 2 complete, `available_rules()` mirrors `RULE_IDS`."""
+    assert set(available_rules()) == set(RULE_IDS)
+    # And the order is preserved.
+    assert available_rules() == list(RULE_IDS)
 
 
 # -- MutationResult / EquivalenceResult -------------------------------------

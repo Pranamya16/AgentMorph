@@ -186,17 +186,28 @@ def test_paraphrase_online_calls_gemini_and_caches(
     assert len(calls) == 1  # still one
 
 
-def test_paraphrase_module_imports_without_google_generativeai() -> None:
+def test_paraphrase_module_has_no_top_level_google_generativeai_import() -> None:
     """The package must stay importable without `google-generativeai`.
 
     Only `_call_gemini()` may import it, and only on demand. This test
-    verifies that importing `agentmorph.paraphrase` doesn't itself pull in
-    the optional dep.
+    inspects the module's source to confirm `google` / `google.generativeai`
+    appears only inside the `_call_gemini` function body.
+
+    Intentionally does NOT use `importlib.reload()` — reloading would
+    rebind `ParaphraseCacheMiss` to a fresh class object, breaking
+    `pytest.raises(ParaphraseCacheMiss)` in other test modules that
+    captured the pre-reload class at their import time.
     """
-    import importlib
-    # Re-import to make sure we see top-level imports, not cached attrs.
-    importlib.reload(mod)
-    # If this import succeeded at all, the module has no top-level
-    # google-generativeai import. The test passes by the absence of an
-    # ImportError at reload time.
-    assert hasattr(mod, "paraphrase")
+    import inspect
+    source = inspect.getsource(mod)
+    # Find module-level imports (top of file, before any `def`/`class`).
+    lines_before_first_def = []
+    for line in source.splitlines():
+        if line.lstrip().startswith(("def ", "class ")):
+            break
+        lines_before_first_def.append(line)
+    module_header = "\n".join(lines_before_first_def)
+    assert "google.generativeai" not in module_header
+    assert "import google" not in module_header
+    # Sanity: the dep IS referenced inside _call_gemini (lazy import).
+    assert "google.generativeai" in source  # somewhere — inside the function
