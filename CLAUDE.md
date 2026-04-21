@@ -105,6 +105,26 @@ python -m agentmorph.runner --hf-cache-dir /content/drive/MyDrive/AgentMorph/hf_
 
 Trajectories land in `<out_dir>/trajectories/<model>__<framework>__<env>.jsonl`; `<out_dir>/manifest.json` tracks completed (model, framework, env, scenario) cells and makes the runner safe to kill and re-launch.
 
+## What needs a GPU vs what doesn't
+
+The package is designed so **everything except actual model inference runs on CPU**. Respect this split — don't force GPU where it isn't needed.
+
+**CPU-only (no torch/CUDA required):**
+- `agentmorph` package imports, tool definitions, 30-tool ecommerce suite
+- Agent adapter orchestration (parsing, tool dispatch, trajectory logging)
+- AgentDojo adapter suite discovery + scenario enumeration
+- Trajectory JSONL read/write, manifest handling, resume logic
+- All unit tests (53 pass without torch installed)
+- Stage 2 mutation rules (text transforms) and equivalence checkers
+- Figure generation, HF dataset upload, CI
+
+**GPU required (T4 or better):**
+- `models.load_model()` — 4-bit weight loading via `BitsAndBytesConfig`
+- `LoadedModel.chat()` — `model.generate()` on the GPU
+- Any `python -m agentmorph.runner` invocation that actually runs a model (i.e. not `--dry-run`)
+
+**Notebook convention:** hard-assert GPU *only* in cells that invoke the runner. Pre-sweep cells (clone, install, adapter probes, dry-runs, suite discovery) should print a GPU-availability note without failing. The `stage1_agentdojo_canary.ipynb` cell layout is the reference pattern — §1 is a soft check, §7 is a hard assert.
+
 ## Stage 1 invariants future work must preserve
 
 - **`ECOMMERCE_TOOL_NAMES` stays at exactly 30.** It's asserted at module load (`tools/ecommerce/__init__.py`) and tested — add/remove tools only by updating both the tuple and the domain builders.
