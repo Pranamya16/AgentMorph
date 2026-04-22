@@ -22,8 +22,15 @@ env/
 *.swp
 .DS_Store
 
-# AgentMorph outputs
-runs/
+# AgentMorph outputs — sweep trajectories, manifests, HF cache mirrors,
+# etc. are all runtime artefacts that live on Drive, not in git.
+# Exception: runs/paraphrase_cache/ is a COMMITTED asset — it's seeded
+# once via scripts/generate_paraphrases.py and the Stage 3 sweep reads
+# it in offline mode. So we ignore everything in runs/ EXCEPT that
+# subdirectory.
+runs/*
+!runs/paraphrase_cache/
+!runs/paraphrase_cache/**
 *.jsonl.tmp
 manifest.json.tmp
 
