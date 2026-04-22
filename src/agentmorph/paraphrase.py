@@ -294,21 +294,17 @@ def _call_gemini(
 ) -> str:
     """Single Gemini call — isolated so tests can monkeypatch it.
 
-    Uses `google-generativeai` (installed via the `[gemini]` extra). Keeps
-    the import lazy so `paraphrase.py` stays importable without the
-    dependency — critical for the `agentmorph` package's CI-without-extras
-    design.
-    """
-    try:
-        import google.generativeai as genai  # type: ignore
-    except ImportError as exc:
-        raise ImportError(
-            "`google-generativeai` not installed. Run "
-            "`pip install agentmorph[gemini]` to enable live paraphrasing. "
-            "Or populate the paraphrase cache offline and re-run with "
-            "`offline=True`."
-        ) from exc
+    Uses the modern `google-genai` SDK (installed via the `[gemini]` extra).
+    Falls back to the legacy `google-generativeai` SDK if only that is
+    installed — the older package is deprecated but still functional.
 
+    Keeps the import lazy so `paraphrase.py` stays importable without the
+    dependency.
+    """
+    # gRPC's credential plugin rejects HTTP headers with control characters.
+    # Colab Secrets and copy-paste often introduce a trailing newline that
+    # turns into a credential-metadata validation error that looks like
+    # "Illegal header value". Defensive strip on every call.
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -316,9 +312,47 @@ def _call_gemini(
             "Get a key from https://aistudio.google.com/app/apikey, then "
             "`export GEMINI_API_KEY=...` (or .env + python-dotenv)."
         )
+    api_key = api_key.strip()  # <- fixes "Illegal header value" from stray \n
+    if not api_key:
+        raise RuntimeError(
+            "GEMINI_API_KEY is set but contains only whitespace after "
+            "stripping. Re-paste the key without trailing newlines."
+        )
 
-    genai.configure(api_key=api_key)
-    gen_model = genai.GenerativeModel(
+    # -- Preferred path: the modern `google-genai` SDK -----------------------
+    try:
+        from google import genai  # type: ignore
+        from google.genai import types as genai_types  # type: ignore
+
+        client = genai.Client(api_key=api_key)
+        config = genai_types.GenerateContentConfig(
+            system_instruction=instruction,
+            temperature=temperature,
+            max_output_tokens=2048,
+        )
+        response = client.models.generate_content(
+            model=model,
+            contents=text,
+            config=config,
+        )
+        out = getattr(response, "text", None) or ""
+        return str(out).strip()
+    except ImportError:
+        pass  # fall through to the legacy SDK
+
+    # -- Fallback path: legacy `google-generativeai` -------------------------
+    try:
+        import google.generativeai as legacy_genai  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "Neither `google-genai` nor `google-generativeai` is installed. "
+            "Run `pip install agentmorph[gemini]` to enable live paraphrasing. "
+            "Or populate the paraphrase cache offline and re-run with "
+            "`offline=True`."
+        ) from exc
+
+    legacy_genai.configure(api_key=api_key)
+    gen_model = legacy_genai.GenerativeModel(
         model,
         system_instruction=instruction,
         generation_config={
@@ -326,11 +360,9 @@ def _call_gemini(
             "max_output_tokens": 2048,
         },
     )
-    # One-shot prompt with the text to paraphrase as the only turn.
     response = gen_model.generate_content(text)
     out = getattr(response, "text", None)
     if not out:
-        # Older/newer client variants expose `parts`.
         parts = getattr(response, "parts", None) or []
         out = "\n".join(str(p) for p in parts) if parts else ""
     return out.strip()
