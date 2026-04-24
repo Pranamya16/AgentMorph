@@ -165,7 +165,7 @@ class LoadedModel:
         # accept it. Try once with the message list as-is; on a chat-template
         # error, fold system messages into the first user message and retry.
         try:
-            prompt_ids = tok.apply_chat_template(
+            template_out = tok.apply_chat_template(
                 messages,
                 add_generation_prompt=True,
                 return_tensors="pt",
@@ -174,7 +174,7 @@ class LoadedModel:
             err = str(exc)
             if "System role" in err or "system role" in err or "Only user and model roles" in err:
                 folded = _fold_system_into_user(messages)
-                prompt_ids = tok.apply_chat_template(
+                template_out = tok.apply_chat_template(
                     folded,
                     add_generation_prompt=True,
                     return_tensors="pt",
@@ -182,20 +182,31 @@ class LoadedModel:
             else:
                 raise
 
-        prompt_ids = prompt_ids.to(self.model.device)
+        # transformers 4.45+ changed `apply_chat_template(return_tensors="pt")`
+        # to return a BatchEncoding (dict-like) rather than a bare Tensor for
+        # most tokenizers. Older transformers returned a Tensor. Handle both.
+        # The original untraceable "AttributeError:" in Stage-3 came from
+        # passing a BatchEncoding positionally to `.generate()`, which tried
+        # to access a Tensor-only attribute on the dict wrapper.
+        if isinstance(template_out, torch.Tensor):
+            input_ids = template_out
+            attention_mask = torch.ones_like(input_ids)
+        else:
+            # BatchEncoding or plain dict from newer transformers.
+            input_ids = template_out["input_ids"]
+            if "attention_mask" in template_out:
+                attention_mask = template_out["attention_mask"]
+            else:
+                attention_mask = torch.ones_like(input_ids)
 
-        # Build an explicit attention mask. Newer transformers (>=4.50)
-        # started emitting warnings + occasional AttributeError deep inside
-        # `generate()` when attention_mask is omitted for unbatched inputs.
-        # It costs us nothing to pass one and it silences the warning.
-        attention_mask = torch.ones_like(prompt_ids)
+        input_ids = input_ids.to(self.model.device)
+        attention_mask = attention_mask.to(self.model.device)
 
         # Sampling config:
         #   * Greedy (temperature == 0) → do_sample=False, omit temperature
         #     entirely. transformers >=4.50 rejects temperature / top_p
         #     when do_sample=False ("generation flags are not valid and
-        #     may be ignored"); the rejection can cascade into an
-        #     AttributeError during config validation on some models.
+        #     may be ignored").
         #   * Sampling (temperature > 0) → do_sample=True, pass temperature
         #     through.
         gen_kwargs: dict[str, Any] = {
@@ -210,10 +221,10 @@ class LoadedModel:
 
         with torch.inference_mode():
             out_ids = self.model.generate(
-                prompt_ids, attention_mask=attention_mask, **gen_kwargs
+                input_ids, attention_mask=attention_mask, **gen_kwargs
             )
 
-        new_tokens = out_ids[0, prompt_ids.shape[1]:]
+        new_tokens = out_ids[0, input_ids.shape[1]:]
         text = tok.decode(new_tokens, skip_special_tokens=True)
 
         if stop:
