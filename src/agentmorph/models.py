@@ -184,15 +184,34 @@ class LoadedModel:
 
         prompt_ids = prompt_ids.to(self.model.device)
 
-        gen_kwargs = dict(
-            max_new_tokens=max_new_tokens,
-            do_sample=temperature > 0,
-            temperature=max(temperature, 1e-5),
-            pad_token_id=tok.pad_token_id or tok.eos_token_id,
-        )
+        # Build an explicit attention mask. Newer transformers (>=4.50)
+        # started emitting warnings + occasional AttributeError deep inside
+        # `generate()` when attention_mask is omitted for unbatched inputs.
+        # It costs us nothing to pass one and it silences the warning.
+        attention_mask = torch.ones_like(prompt_ids)
+
+        # Sampling config:
+        #   * Greedy (temperature == 0) → do_sample=False, omit temperature
+        #     entirely. transformers >=4.50 rejects temperature / top_p
+        #     when do_sample=False ("generation flags are not valid and
+        #     may be ignored"); the rejection can cascade into an
+        #     AttributeError during config validation on some models.
+        #   * Sampling (temperature > 0) → do_sample=True, pass temperature
+        #     through.
+        gen_kwargs: dict[str, Any] = {
+            "max_new_tokens": max_new_tokens,
+            "pad_token_id": tok.pad_token_id or tok.eos_token_id,
+        }
+        if temperature > 0:
+            gen_kwargs["do_sample"] = True
+            gen_kwargs["temperature"] = temperature
+        else:
+            gen_kwargs["do_sample"] = False
 
         with torch.inference_mode():
-            out_ids = self.model.generate(prompt_ids, **gen_kwargs)
+            out_ids = self.model.generate(
+                prompt_ids, attention_mask=attention_mask, **gen_kwargs
+            )
 
         new_tokens = out_ids[0, prompt_ids.shape[1]:]
         text = tok.decode(new_tokens, skip_special_tokens=True)

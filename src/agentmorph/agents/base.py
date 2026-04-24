@@ -421,7 +421,17 @@ class NativeAgent:
             else:
                 trajectory.add_error("max_steps exhausted without a FINAL answer")
         except Exception as exc:  # pragma: no cover — defensive
-            trajectory.add_error(f"{type(exc).__name__}: {exc}")
+            # Include both message and the last few traceback frames so a
+            # silent exception (e.g. bare `AttributeError()`) is still
+            # diagnosable from the trajectory JSONL alone — no need to
+            # re-run the sweep under a debugger. Keep the bound short so
+            # we don't bloat the HF dataset rows.
+            import traceback
+            tb = traceback.format_exc().strip().splitlines()
+            tail = "\n".join(tb[-8:]) if tb else ""
+            trajectory.add_error(
+                f"{type(exc).__name__}: {exc!s} | tb:\n{tail}"
+            )
 
         trajectory.finish()
         return trajectory
