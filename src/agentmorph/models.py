@@ -327,20 +327,40 @@ def load_model(
         else:
             model_kwargs["torch_dtype"] = torch.float16
 
-        # VRAM budget: cap GPU usage so transformers spills the last layers
-        # to CPU instead of OOM-ing during the materialisation phase. The
-        # 1.5 GiB headroom covers activations + KV cache during inference;
-        # without it, Phi-4 (4-bit ~7-8 GB weights) does not fit on a
-        # standard T4 (14.56 GiB) under newer transformers versions whose
-        # core_model_loading peaks higher than the old loader did.
-        # Smaller models (Llama-3.2-3B at 2.5 GB) are well under the budget,
-        # so transformers keeps everything on GPU and there is no perf hit.
+        # VRAM budget: cap GPU usage so transformers spills layers to CPU
+        # instead of OOM-ing during the materialisation phase.
+        #
+        # First-pass headroom of 1.5 GiB was insufficient: transformers'
+        # `core_model_loading` materialises tensors in parallel, and each
+        # in-flight tensor briefly holds an fp16 staging buffer BEFORE the
+        # 4-bit quantisation runs. The peak crossed our budget and Phi-4
+        # OOMed at 56 % loaded on a 14.56 GiB T4. Bumping headroom to
+        # 4.5 GiB forces transformers to place more weights on CPU
+        # up-front, leaving enough room for the staging peak.
+        #
+        # Smaller models (Llama-3.2-3B at ~2.5 GB, Qwen-7B at ~4 GB,
+        # Llama-3.1-8B at ~4.5 GB, Gemma-2-9B at ~5.5 GB) all fit well
+        # under a 10 GiB GPU budget — so on T4 they stay fully on GPU
+        # with zero perf cost. Only Phi-4 (~7-8 GB at 4-bit, plus the
+        # higher load peak) gets partial CPU offload.
         total_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
-        budget_gb = max(total_gb - 1.5, 4.0)
+        budget_gb = max(total_gb - 4.5, 4.0)
         model_kwargs["max_memory"] = {
             0: f"{budget_gb:.1f}GiB",
             "cpu": "30GiB",
         }
+
+        # Disk offload backup: if even the CPU-offloaded layers spill the
+        # 25 GB Colab CPU RAM, transformers will use this folder instead of
+        # OOMing CPU-side. `offload_state_dict=True` also forces the loader
+        # to stream the state dict from disk one piece at a time, lowering
+        # the materialisation peak. Necessary for Phi-4 on T4; harmless on
+        # smaller models (the folder stays empty).
+        import tempfile
+        offload_dir = os.path.join(tempfile.gettempdir(), "agentmorph_offload")
+        os.makedirs(offload_dir, exist_ok=True)
+        model_kwargs["offload_folder"] = offload_dir
+        model_kwargs["offload_state_dict"] = True
     else:
         # CPU: no device_map (accelerate behavior varies on CPU), explicit
         # fp32 compute, no bnb. `.to("cpu")` is implicit after load.
