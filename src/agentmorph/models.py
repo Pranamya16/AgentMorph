@@ -326,10 +326,31 @@ def load_model(
             )
         else:
             model_kwargs["torch_dtype"] = torch.float16
+
+        # VRAM budget: cap GPU usage so transformers spills the last layers
+        # to CPU instead of OOM-ing during the materialisation phase. The
+        # 1.5 GiB headroom covers activations + KV cache during inference;
+        # without it, Phi-4 (4-bit ~7-8 GB weights) does not fit on a
+        # standard T4 (14.56 GiB) under newer transformers versions whose
+        # core_model_loading peaks higher than the old loader did.
+        # Smaller models (Llama-3.2-3B at 2.5 GB) are well under the budget,
+        # so transformers keeps everything on GPU and there is no perf hit.
+        total_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+        budget_gb = max(total_gb - 1.5, 4.0)
+        model_kwargs["max_memory"] = {
+            0: f"{budget_gb:.1f}GiB",
+            "cpu": "30GiB",
+        }
     else:
         # CPU: no device_map (accelerate behavior varies on CPU), explicit
         # fp32 compute, no bnb. `.to("cpu")` is implicit after load.
         model_kwargs["torch_dtype"] = torch.float32
+
+    # Empty the CUDA cache right before from_pretrained — the materialisation
+    # path is sensitive to fragmentation and a fresh allocator state buys us
+    # the few hundred MB that pushed Phi-4 over the edge on T4.
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     model = AutoModelForCausalLM.from_pretrained(spec.hf_repo, **model_kwargs)
     model.eval()
