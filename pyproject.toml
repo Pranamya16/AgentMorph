@@ -19,7 +19,12 @@ dependencies = [
 [project.optional-dependencies]
 models = [
     "torch>=2.3",
-    "transformers>=4.45",
+    # Pinned <4.50 to avoid the `core_model_loading` parallel-materialisation
+    # peak that pushes Phi-4 and Gemma-2-9B over the 14.56 GiB T4 limit on
+    # Colab. transformers 4.48 is the first version with Phi-4 support; 4.49
+    # is the last before the new loader. Stage 1 ran fine on this range; the
+    # OOMs only started after Colab auto-upgraded to 4.50+.
+    "transformers>=4.48,<4.50",
     "accelerate>=0.34",
     "bitsandbytes>=0.43",
 ]
